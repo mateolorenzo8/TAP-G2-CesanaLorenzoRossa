@@ -1,6 +1,7 @@
 import os
 import random
 import sys
+import time
 from pathlib import Path
 from PIL import Image, ImageOps, ImageEnhance
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -80,6 +81,8 @@ def run_pipeline(input_dir, output_dir, config):
 
     print(f"Encontradas {total} imágenes. Iniciando procesamiento en paralelo...")
 
+    start_time = time.perf_counter()
+
     # Usar Multiprocessing con el número total de cores disponibles
     num_cores = multiprocessing.cpu_count()
 
@@ -95,4 +98,11 @@ def run_pipeline(input_dir, output_dir, config):
                 future.result()
                 pbar.update(1)
 
-    print("Procesamiento completado.")
+    elapsed_time = time.perf_counter() - start_time
+    if elapsed_time >= 60:
+        mins, secs = divmod(elapsed_time, 60)
+        time_str = f"{int(mins)}m {secs:.2f}s ({elapsed_time:.2f}s)"
+    else:
+        time_str = f"{elapsed_time:.2f}s"
+
+    print(f"Procesamiento completado en {time_str}.")

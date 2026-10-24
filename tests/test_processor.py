@@ -1,10 +1,12 @@
 import os
 from pathlib import Path
+from unittest.mock import patch
+import multiprocessing
 import pytest
 import yaml
 from PIL import Image
 
-from processor import process_single_image, run_pipeline
+from processor import process_single_image, run_pipeline, ProcessPoolExecutor
 
 
 class TestProcessSingleImage:
@@ -376,3 +378,27 @@ class TestRunPipeline:
         captured = capsys.readouterr()
         assert "Todas las imágenes se procesaron correctamente." in captured.out
         assert failed_images == []
+
+    def test_run_pipeline_respects_max_cores(self, tmp_path, dummy_images_dir, test_config_file):
+        """Verifica que run_pipeline configure ProcessPoolExecutor con el max_cores especificado en config."""
+        output_dir = tmp_path / "output_cores"
+        config_path, _ = test_config_file(transformations={"brightness": {"generate_count": 0}})
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = yaml.safe_load(f)
+
+        config["max_cores"] = 1
+
+        with patch("processor.ProcessPoolExecutor", wraps=ProcessPoolExecutor) as mock_executor:
+            run_pipeline(str(dummy_images_dir), str(output_dir), config)
+            assert mock_executor.call_args[1]["max_workers"] == 1
+
+    def test_run_pipeline_default_cores_when_not_specified(self, tmp_path, dummy_images_dir, test_config_file):
+        """Verifica que run_pipeline use cpu_count por defecto cuando max_cores no está definido."""
+        output_dir = tmp_path / "output_default_cores"
+        config_path, _ = test_config_file(transformations={"brightness": {"generate_count": 0}})
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = yaml.safe_load(f)
+
+        with patch("processor.ProcessPoolExecutor", wraps=ProcessPoolExecutor) as mock_executor:
+            run_pipeline(str(dummy_images_dir), str(output_dir), config)
+            assert mock_executor.call_args[1]["max_workers"] == multiprocessing.cpu_count()

@@ -82,8 +82,25 @@ def run_pipeline(input_dir, output_dir, config):
 
     print(f"Encontradas {total} imágenes. Iniciando procesamiento en paralelo...")
 
-    # Usar Multiprocessing con el número total de cores disponibles
-    num_cores = multiprocessing.cpu_count()
+    # Determinar el número de cores a usar (configurable desde config.yaml con 'max_cores')
+    available_cores = multiprocessing.cpu_count()
+    config_cores = (
+        config.get('max_cores')
+        or config.get('max_workers')
+        or (config.get('execution', {}).get('max_cores') if isinstance(config.get('execution'), dict) else None)
+    )
+
+    if config_cores is not None:
+        try:
+            config_cores = int(config_cores)
+            if config_cores > 0:
+                num_cores = min(config_cores, available_cores)
+            else:
+                num_cores = available_cores
+        except (ValueError, TypeError):
+            num_cores = available_cores
+    else:
+        num_cores = available_cores
 
     failed_images = []
     with ProcessPoolExecutor(max_workers=num_cores) as executor:

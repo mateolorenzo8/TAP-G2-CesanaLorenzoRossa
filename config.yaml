@@ -1,3 +1,5 @@
+max_cores: 4 # Número máximo de cores a utilizar en paralelo (opcional, por defecto usa todos los disponibles)
+
 transformations:
   resize:
     width: 800

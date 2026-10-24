@@ -59,8 +59,10 @@ def process_single_image(input_path, output_dir, config):
                 out_name = Path(input_path).name
                 img.save(os.path.join(output_dir, out_name), quality=85)
 
+        return True, None
     except Exception as e:
         print(f"\nError procesando {input_path}: {e}")
+        return False, str(e)
 
 
 def run_pipeline(input_dir, output_dir, config):
@@ -76,23 +78,46 @@ def run_pipeline(input_dir, output_dir, config):
     total = len(images)
     if total == 0:
         print("No se encontraron imágenes válidas en el directorio de entrada.")
-        return
+        return []
 
     print(f"Encontradas {total} imágenes. Iniciando procesamiento en paralelo...")
 
     # Usar Multiprocessing con el número total de cores disponibles
     num_cores = multiprocessing.cpu_count()
 
+    failed_images = []
     with ProcessPoolExecutor(max_workers=num_cores) as executor:
-        futures = [
-            executor.submit(process_single_image, img_path, output_dir, config['transformations'])
+        futures = {
+            executor.submit(process_single_image, img_path, output_dir, config['transformations']): img_path
             for img_path in images
-        ]
+        }
 
         # Barra de progreso que se actualiza conforme cada imagen termina
         with tqdm(total=total, desc="Procesando", unit="img", file=sys.stdout) as pbar:
             for future in as_completed(futures):
-                future.result()
+                img_path = futures[future]
+                try:
+                    result = future.result()
+                    if isinstance(result, tuple):
+                        success, error = result
+                        if not success:
+                            failed_images.append((img_path, error))
+                    elif result is False:
+                        failed_images.append((img_path, "Error desconocido"))
+                except Exception as exc:
+                    failed_images.append((img_path, str(exc)))
                 pbar.update(1)
 
     print("Procesamiento completado.")
+    if failed_images:
+        failed_images.sort(key=lambda x: str(x[0]))
+        print(f"\nImágenes que fallaron ({len(failed_images)}/{total}):")
+        for img_path, err in failed_images:
+            if err:
+                print(f" - {img_path}: {err}")
+            else:
+                print(f" - {img_path}")
+    else:
+        print("Todas las imágenes se procesaron correctamente.")
+
+    return failed_images

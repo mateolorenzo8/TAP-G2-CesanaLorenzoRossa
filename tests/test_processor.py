@@ -340,3 +340,39 @@ class TestRunPipeline:
             with Image.open(out_file) as img:
                 assert img.size == (800, 800)
                 assert img.mode == "RGB"
+
+    def test_run_pipeline_reports_failed_images(self, tmp_path, dummy_image_factory, test_config_file, capsys):
+        """Verifica que run_pipeline reporte e identifique al final las imágenes que fallaron."""
+        input_dir = tmp_path / "mixed_dataset"
+        input_dir.mkdir(parents=True, exist_ok=True)
+        dummy_image_factory("ok1.png", size=(50, 50), directory=input_dir)
+
+        # Archivo con extensión de imagen válida pero contenido corrupto
+        corrupt_file = input_dir / "corrupt.png"
+        corrupt_file.write_bytes(b"datos corruptos no imagen")
+
+        output_dir = tmp_path / "output_mixed"
+        config_path, _ = test_config_file(transformations={"brightness": {"generate_count": 0}})
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = yaml.safe_load(f)
+
+        failed_images = run_pipeline(str(input_dir), str(output_dir), config)
+
+        captured = capsys.readouterr()
+        assert "Imágenes que fallaron (1/2):" in captured.out
+        assert "corrupt.png" in captured.out
+        assert len(failed_images) == 1
+        assert str(corrupt_file) == failed_images[0][0]
+
+    def test_run_pipeline_reports_all_success(self, tmp_path, dummy_images_dir, test_config_file, capsys):
+        """Verifica que run_pipeline reporte éxito total cuando todas las imágenes se procesan correctamente."""
+        output_dir = tmp_path / "output_all_success"
+        config_path, _ = test_config_file(transformations={"brightness": {"generate_count": 0}})
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = yaml.safe_load(f)
+
+        failed_images = run_pipeline(str(dummy_images_dir), str(output_dir), config)
+
+        captured = capsys.readouterr()
+        assert "Todas las imágenes se procesaron correctamente." in captured.out
+        assert failed_images == []

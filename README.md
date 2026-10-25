@@ -1,26 +1,104 @@
-# Procesador Masivo de Imágenes CLI
+# Procesador Masivo de Imágenes
 
-Pipeline de procesamiento y aumento de imágenes por lotes (batch processing), diseñado para alto rendimiento mediante procesamiento paralelo multinúcleo (`multiprocessing`), completamente contenerizado con **Docker** y desacoplado de su configuración.
+Pipeline de procesamiento y aumento de imágenes por lotes (batch processing), diseñado para alto rendimiento mediante procesamiento paralelo multinúcleo (`multiprocessing`), utilizable tanto como **herramienta CLI / Docker** como **biblioteca de Python**.
 
 ---
 
 ## 📁 Estructura del Repositorio
 
 ```text
-├── Dockerfile          # Definición de la imagen del contenedor (Python 3.14-slim)
-├── .dockerignore       # Archivos excluidos del contexto de compilación (incluye config.yaml)
-├── config.yaml         # Archivo de configuración con los parámetros de transformación y ejecución
-├── main.py             # Punto de entrada CLI (parseo de argumentos y carga de configuración)
-├── processor.py        # Motor de procesamiento en paralelo (Pillow, ProcessPoolExecutor, tqdm)
-├── pyproject.toml      # Definición de dependencias del proyecto (uv/pip)
-├── requirements.txt    # Dependencias congeladas para la instalación dentro del contenedor
-└── README.md           # Documentación técnica del proyecto
+├── Dockerfile              # Definición de la imagen del contenedor (Python 3.14-slim)
+├── .dockerignore           # Archivos excluidos del contexto de compilación (incluye config.yaml)
+├── config.yaml             # Archivo de configuración con los parámetros de transformación y ejecución
+├── main.py                 # Punto de entrada CLI (parseo de argumentos y carga de configuración)
+├── processor.py            # Motor de procesamiento en paralelo (Pillow, ProcessPoolExecutor, tqdm)
+├── image_processor/        # Paquete para uso como biblioteca de Python
+│   └── __init__.py         # Re-exporta process_images, run_pipeline, etc.
+├── pyproject.toml          # Definición de dependencias y empaquetado del proyecto (pip/uv)
+├── requirements.txt        # Dependencias congeladas para la instalación dentro del contenedor
+├── tests/                  # Suite completa de pruebas unitarias e integración (pytest)
+└── README.md               # Documentación técnica del proyecto
+```
+
+---
+
+## 🐍 Uso como Biblioteca de Python
+
+Puedes importar y utilizar el procesador directamente en tus scripts y módulos de Python. Está disponible importando tanto `image_processor` como `processor`:
+
+### Instalación en el entorno
+```bash
+pip install -e .
+```
+
+### Ejemplos de uso
+
+#### 1. Usando un archivo de configuración YAML
+```python
+import image_processor  # o: import processor
+
+# Procesa las imágenes usando el archivo config.yaml
+errores = image_processor.process_images(
+    input_path="ruta/a/imagenes_origen",
+    output_dir="ruta/a/salida",
+    config="config.yaml"
+)
+
+if not errores:
+    print("Todas las imágenes se procesaron con éxito.")
+else:
+    print(f"Fallaron {len(errores)} imágenes:", errores)
+```
+
+#### 2. Pasando la configuración como diccionario de Python
+```python
+from image_processor import process_images
+
+configuracion = {
+    "copies": 2,
+    "pipeline": [
+        {"type": "resize", "width": 800, "height": 800, "mode": "fit"},
+        {"type": "grayscale"},
+        {"type": "brightness", "min_factor": 0.8, "max_factor": 1.2}
+    ]
+}
+
+process_images(
+    input_path="ruta/a/imagenes",
+    output_dir="ruta/a/destino",
+    config=configuracion,
+    max_cores=4
+)
+```
+
+#### 3. Procesar una imagen individual o una lista de imágenes
+```python
+import processor
+
+# Imagen individual:
+processor.process_images("foto.png", "salida/", config="config.yaml")
+
+# Lista de imágenes seleccionadas:
+processor.process_images(["img1.jpg", "img2.png"], "salida/", config="config.yaml")
+```
+
+#### 4. Modo silencioso (sin barra de progreso en consola)
+```python
+import image_processor
+
+image_processor.process_images(
+    input_path="fotos/",
+    output_dir="salida/",
+    config="config.yaml",
+    show_progress=False
+)
 ```
 
 ---
 
 ## ⚙️ Características Técnicas
 
+- **Uso Dual (CLI y Biblioteca)**: Puede utilizarse como biblioteca de Python (`image_processor.process_images(...)` o `processor.process_images(...)`) o ejecutarse por línea de comandos vía `python main.py` o Docker.
 - **Procesamiento Paralelo**: Utiliza `ProcessPoolExecutor` distribuyendo la carga de trabajo entre núcleos de CPU. Permite limitar la cantidad de núcleos en uso mediante el parámetro opcional `max_cores` o utilizar todos los disponibles por defecto (`multiprocessing.cpu_count()`).
 - **Pipeline de Transformaciones Secuencial**:
   - Arquitectura modular basada en un pipeline ordenado de pasos (`pipeline`), donde cada operación se aplica de forma sucesiva en el orden especificado.
@@ -32,7 +110,7 @@ Pipeline de procesamiento y aumento de imágenes por lotes (batch processing), d
     - **Ajuste de brillo (`brightness`)**: Soporta factor fijo (`factor`) o muestreo aleatorio uniforme dentro de un rango (`min_factor` y `max_factor`).
 - **Aumento de Datos (Data Augmentation)**: Control de variantes por imagen mediante el parámetro `copies`. Si `copies > 0`, se generan copias aumentadas con sufijo `_aug_{i}` aplicando el pipeline a cada una. Si es `0`, se genera una única imagen con su nombre original.
 - **Manejo de Errores y Diagnóstico**: Resiliencia frente a archivos corruptos o imágenes dañadas sin interrumpir el procesamiento en lote, con un resumen detallado al finalizar de las imágenes que fallaron y el motivo del error.
-- **Compatibilidad Retroactiva**: El motor admite tanto la nueva sintaxis de pipeline (`pipeline` y `copies`) como el formato anterior basado en diccionario de transformaciones.
+- **Compatibilidad Retroactiva**: El motor admite tanto la nueva sintaxis de pipeline (`pipeline` y `copies`) como el formato anterior basado en diccionario de transformaciones, así como la función histórica `run_pipeline(...)`.
 - **Configuración Desacoplada**: El archivo `config.yaml` no reside dentro de la imagen de Docker, permitiendo modificar las reglas de procesamiento sin recompilar el contenedor.
 - **Barra de Progreso Interactiva**: Monitoreo en tiempo real con métricas de velocidad (img/s) y tiempo estimado (ETA) mediante `tqdm` y futuros asíncronos (`as_completed`).
 
@@ -43,8 +121,7 @@ Pipeline de procesamiento y aumento de imágenes por lotes (batch processing), d
 Para construir la imagen localmente bajo el nombre `image-processor`, ejecuta desde la raíz del repositorio:
 
 ```bash
-docker build -t image-processor .
-```
+docker build -t image-processor .\n```
 
 ## 🚀 Ejecución desde la Consola
 
@@ -122,9 +199,6 @@ transformations:
       min_factor: 0.5 # Factor mínimo (< 1 oscurece)
       max_factor: 1.5 # Factor máximo (> 1 aclara)
       # Nota: También admite 'factor: 1.2' para aplicar un brillo constante fijo
-    
-    # 5. Ajuste de escala de grises
-    - type: grayscale
 ```
 
 ### Detalle de parámetros del Pipeline

@@ -1,10 +1,12 @@
 import os
 from pathlib import Path
+from unittest.mock import patch
+import multiprocessing
 import pytest
 import yaml
 from PIL import Image
 
-from processor import process_single_image, run_pipeline
+from processor import process_single_image, run_pipeline, ProcessPoolExecutor
 
 
 class TestProcessSingleImage:
@@ -328,9 +330,8 @@ class TestRunPipeline:
         run_pipeline(str(dummy_images_dir), str(output_dir), config)
 
         # En config.yaml:
-        # resize: width=800, height=800, mode="stretch"
-        # rotate: angle=45, mode="crop"
-        # brightness: generate_count=3
+        # pipeline: resize(800x800, stretch) -> rotate(45, crop) -> brightness
+        # copies: 3
         # 4 imágenes dummy de entrada * 3 aumentos = 12 imágenes generadas
         output_files = list(output_dir.glob("*"))
         assert len(output_files) == 12
@@ -340,3 +341,201 @@ class TestRunPipeline:
             with Image.open(out_file) as img:
                 assert img.size == (800, 800)
                 assert img.mode == "RGB"
+
+    def test_run_pipeline_reports_failed_images(self, tmp_path, dummy_image_factory, test_config_file, capsys):
+        """Verifica que run_pipeline reporte e identifique al final las imágenes que fallaron."""
+        input_dir = tmp_path / "mixed_dataset"
+        input_dir.mkdir(parents=True, exist_ok=True)
+        dummy_image_factory("ok1.png", size=(50, 50), directory=input_dir)
+
+        # Archivo con extensión de imagen válida pero contenido corrupto
+        corrupt_file = input_dir / "corrupt.png"
+        corrupt_file.write_bytes(b"datos corruptos no imagen")
+
+        output_dir = tmp_path / "output_mixed"
+        config_path, _ = test_config_file(transformations={"brightness": {"generate_count": 0}})
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = yaml.safe_load(f)
+
+        failed_images = run_pipeline(str(input_dir), str(output_dir), config)
+
+        captured = capsys.readouterr()
+        assert "Imágenes que fallaron (1/2):" in captured.out
+        assert "corrupt.png" in captured.out
+        assert len(failed_images) == 1
+        assert str(corrupt_file) == failed_images[0][0]
+
+    def test_run_pipeline_reports_all_success(self, tmp_path, dummy_images_dir, test_config_file, capsys):
+        """Verifica que run_pipeline reporte éxito total cuando todas las imágenes se procesan correctamente."""
+        output_dir = tmp_path / "output_all_success"
+        config_path, _ = test_config_file(transformations={"brightness": {"generate_count": 0}})
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = yaml.safe_load(f)
+
+        failed_images = run_pipeline(str(dummy_images_dir), str(output_dir), config)
+
+        captured = capsys.readouterr()
+        assert "Todas las imágenes se procesaron correctamente." in captured.out
+        assert failed_images == []
+
+    def test_run_pipeline_respects_max_cores(self, tmp_path, dummy_images_dir, test_config_file):
+        """Verifica que run_pipeline configure ProcessPoolExecutor con el max_cores especificado en config."""
+        output_dir = tmp_path / "output_cores"
+        config_path, _ = test_config_file(transformations={"brightness": {"generate_count": 0}})
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = yaml.safe_load(f)
+
+        config["max_cores"] = 1
+
+        with patch("processor.ProcessPoolExecutor", wraps=ProcessPoolExecutor) as mock_executor:
+            run_pipeline(str(dummy_images_dir), str(output_dir), config)
+            assert mock_executor.call_args[1]["max_workers"] == 1
+
+    def test_run_pipeline_default_cores_when_not_specified(self, tmp_path, dummy_images_dir, test_config_file):
+        """Verifica que run_pipeline use cpu_count por defecto cuando max_cores no está definido."""
+        output_dir = tmp_path / "output_default_cores"
+        config_path, _ = test_config_file(transformations={"brightness": {"generate_count": 0}})
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = yaml.safe_load(f)
+
+        with patch("processor.ProcessPoolExecutor", wraps=ProcessPoolExecutor) as mock_executor:
+            run_pipeline(str(dummy_images_dir), str(output_dir), config)
+            assert mock_executor.call_args[1]["max_workers"] == multiprocessing.cpu_count()
+
+
+class TestPipelineTransformations:
+    """Pruebas unitarias e integración para el formato nuevo con pipeline y copies."""
+
+    def test_pipeline_execution_order(self, tmp_path, dummy_image_factory):
+        """Verifica que las transformaciones se ejecuten en el orden estricto del YAML."""
+        # Imagen inicial 200x100
+        img_path = dummy_image_factory("order_test.png", size=(200, 100))
+
+        # Pipeline A: primero rotar 90 (200x100 -> 100x200), luego resize stretch a (50, 70) -> tamaño final (50, 70)
+        output_dir_a = tmp_path / "out_order_a"
+        config_a = {
+            "pipeline": [
+                {"type": "rotate", "angle": 90, "mode": "crop"},
+                {"type": "resize", "width": 50, "height": 70, "mode": "stretch"},
+            ]
+        }
+        process_single_image(str(img_path), str(output_dir_a), config_a)
+        with Image.open(output_dir_a / "order_test.png") as img:
+            assert img.size == (50, 70)
+
+        # Pipeline B: primero resize a (50, 70), luego rotar 90 -> tamaño final debe ser (70, 50)
+        output_dir_b = tmp_path / "out_order_b"
+        config_b = {
+            "pipeline": [
+                {"type": "resize", "width": 50, "height": 70, "mode": "stretch"},
+                {"type": "rotate", "angle": 90, "mode": "crop"},
+            ]
+        }
+        process_single_image(str(img_path), str(output_dir_b), config_b)
+        with Image.open(output_dir_b / "order_test.png") as img:
+            assert img.size == (70, 50)
+
+    def test_pipeline_repeating_steps(self, tmp_path, dummy_image_factory):
+        """Verifica que se puedan repetir pasos de transformación en el pipeline."""
+        img_path = dummy_image_factory("repeat_test.png", size=(100, 100))
+        output_dir = tmp_path / "out_repeat"
+
+        # Repetir rotación ortogonal dos veces (90 + 90 = 180) y cambiar tamaño
+        config = {
+            "pipeline": [
+                {"type": "rotate", "angle": 90, "mode": "crop"},
+                {"type": "resize", "width": 60, "height": 40, "mode": "stretch"},
+                {"type": "rotate", "angle": 90, "mode": "crop"},
+            ]
+        }
+        process_single_image(str(img_path), str(output_dir), config)
+        with Image.open(output_dir / "repeat_test.png") as img:
+            # 60x40 rotado 90 ortogonal queda en 40x60
+            assert img.size == (40, 60)
+
+    def test_pipeline_with_copies_and_brightness(self, tmp_path, dummy_image_factory):
+        """Verifica que 'copies' genere la cantidad indicada de variantes con sufijo _aug_i."""
+        img_path = dummy_image_factory("copies_test.png", size=(50, 50))
+        output_dir = tmp_path / "out_copies"
+
+        config = {
+            "copies": 3,
+            "pipeline": [
+                {"type": "resize", "width": 30, "height": 30, "mode": "stretch"},
+                {"type": "brightness", "min_factor": 0.8, "max_factor": 1.2},
+            ]
+        }
+        process_single_image(str(img_path), str(output_dir), config)
+
+        generated = sorted(list(output_dir.glob("*.png")))
+        assert len(generated) == 3
+        expected = ["copies_test_aug_0.png", "copies_test_aug_1.png", "copies_test_aug_2.png"]
+        assert [f.name for f in generated] == expected
+
+        for f in generated:
+            with Image.open(f) as img:
+                assert img.size == (30, 30)
+
+    def test_pipeline_grayscale_step(self, tmp_path, dummy_image_factory):
+        """Verifica que un paso grayscale en el pipeline convierta los canales adecuadamente."""
+        img_path = dummy_image_factory("gray_pipe.png", size=(40, 40), color=(200, 100, 50))
+        output_dir = tmp_path / "out_gray_pipe"
+
+        config = {
+            "pipeline": [
+                {"type": "grayscale"},
+            ]
+        }
+        process_single_image(str(img_path), str(output_dir), config)
+
+        with Image.open(output_dir / "gray_pipe.png") as img:
+            r, g, b = img.split()
+            assert r.tobytes() == g.tobytes() == b.tobytes()
+
+    def test_pipeline_invalid_step_type_reported(self, tmp_path, dummy_image_factory):
+        """Verifica que un tipo de transformación inválido capture el error y no produzca salida."""
+        img_path = dummy_image_factory("invalid_step.png", size=(40, 40))
+        output_dir = tmp_path / "out_invalid_step"
+
+        config = {
+            "pipeline": [
+                {"type": "desconocido_123"},
+            ]
+        }
+        success, error = process_single_image(str(img_path), str(output_dir), config)
+
+        assert success is False
+        assert "Tipo de transformación no soportado" in error
+        assert len(list(output_dir.glob("*"))) == 0
+
+    def test_run_pipeline_with_pipeline_and_copies_yaml(self, tmp_path, dummy_images_dir):
+        """Verifica la ejecución completa de run_pipeline con el nuevo formato YAML."""
+        yaml_content = """
+max_cores: 2
+transformations:
+  copies: 2
+  pipeline:
+    - type: resize
+      width: 120
+      height: 120
+      mode: stretch
+    - type: rotate
+      angle: 90
+      mode: crop
+"""
+        config_path = tmp_path / "new_format_config.yaml"
+        config_path.write_text(yaml_content, encoding="utf-8")
+        output_dir = tmp_path / "out_new_format_pipeline"
+
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = yaml.safe_load(f)
+
+        failed = run_pipeline(str(dummy_images_dir), str(output_dir), config)
+
+        assert failed == []
+        # dummy_images_dir tiene 4 imágenes válidas * 2 copias = 8 archivos generados
+        generated = list(output_dir.glob("*"))
+        assert len(generated) == 8
+        for f in generated:
+            with Image.open(f) as img:
+                assert img.size == (120, 120)

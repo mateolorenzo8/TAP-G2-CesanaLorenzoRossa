@@ -1,13 +1,15 @@
+max_cores: 4 # Número máximo de cores a utilizar en paralelo (opcional, por defecto usa todos los disponibles)
+
 transformations:
-  resize:
-    width: 800
-    height: 800
-    mode: "stretch" # Opciones: 'stretch' (deforma), 'fit' (mantiene aspect ratio), 'crop' (recorta al centro)
-  rotate:
-    angle: 45
-    mode: "crop" # 'fill' (expande el canvas), 'crop' (recorta para mantener el tamaño)
-  grayscale: false
-  brightness:
-    generate_count: 3 # Cuántas imágenes generar por cada original
-    min_factor: 0.5   # 1.0 es original, <1 oscurece, >1 ilumina
-    max_factor: 1.5
+  copies: 3 # Cuántas variantes generar por cada imagen original
+  pipeline:
+    - type: resize
+      width: 800
+      height: 800
+      mode: stretch # 'stretch' (deforma), 'fit' (mantiene aspect ratio), 'crop' (recorta al centro)
+    - type: rotate
+      angle: 45
+      mode: crop # 'fill' (expande el canvas), 'crop' (recorta para mantener el tamaño)
+    - type: brightness
+      min_factor: 0.5 # 1.0 es original, <1 oscurece, >1 ilumina
+      max_factor: 1.5

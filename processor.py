@@ -7,6 +7,7 @@ from PIL import Image, ImageOps, ImageEnhance
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import multiprocessing
 from tqdm import tqdm
+import yaml
 
 
 def apply_transformation(img, step):
@@ -94,6 +95,10 @@ def get_pipeline_and_copies(config):
 
 
 def process_single_image(input_path, output_dir, config):
+    """
+    Procesa un archivo de imagen individual aplicando las transformaciones configuradas.
+    Retorna una tupla (éxito: bool, error: str | None).
+    """
     try:
         pipeline, copies = get_pipeline_and_copies(config)
 
@@ -124,29 +129,130 @@ def process_single_image(input_path, output_dir, config):
         return False, str(e)
 
 
-def run_pipeline(input_dir, output_dir, config):
-    os.makedirs(output_dir, exist_ok=True)
+def load_config(config=None):
+    """
+    Carga y normaliza la configuración.
 
-    # Obtener lista de imágenes
+    Parámetros:
+        config (dict | str | Path | None):
+            - Si es None: intenta cargar 'config.yaml' si existe en el directorio actual,
+              o retorna un diccionario vacío.
+            - Si es str o Path: lee el archivo YAML correspondiente.
+            - Si es dict: devuelve una copia del diccionario.
+
+    Retorna:
+        dict: Diccionario de configuración normalizado.
+    """
+    if config is None:
+        default_config = Path("config.yaml")
+        if default_config.is_file():
+            with open(default_config, "r", encoding="utf-8") as f:
+                loaded = yaml.safe_load(f) or {}
+        else:
+            loaded = {}
+    elif isinstance(config, (str, Path)):
+        config_path = Path(config)
+        if not config_path.is_file():
+            raise FileNotFoundError(f"Archivo de configuración no encontrado: {config_path}")
+        with open(config_path, "r", encoding="utf-8") as f:
+            loaded = yaml.safe_load(f) or {}
+    elif isinstance(config, dict):
+        loaded = dict(config)
+    else:
+        raise TypeError(
+            f"Configuración inválida: se esperaba dict, str, Path o None, pero se recibió {type(config).__name__}"
+        )
+
+    # Si se pasaron transformaciones directamente en el nivel raíz sin clave 'transformations',
+    # las encapsulamos para compatibilidad.
+    if "transformations" not in loaded:
+        if any(k in loaded for k in ("pipeline", "copies", "resize", "rotate", "grayscale", "brightness")):
+            cores_val = loaded.get("max_cores")
+            workers_val = loaded.get("max_workers")
+            loaded = {
+                "max_cores": cores_val,
+                "max_workers": workers_val,
+                "transformations": loaded,
+            }
+
+    return loaded
+
+
+def process_images(
+    input_path,
+    output_dir,
+    config=None,
+    max_cores=None,
+    show_progress=True,
+):
+    """
+    Punto de entrada principal para utilizar la herramienta como biblioteca de Python.
+
+    Parámetros:
+        input_path (str | Path | list[str | Path]):
+            Directorio con imágenes a procesar, ruta a un archivo de imagen individual,
+            o lista de rutas de imágenes.
+        output_dir (str | Path):
+            Directorio donde se guardarán las imágenes procesadas.
+        config (dict | str | Path | None, opcional):
+            Configuración de transformaciones (diccionario, ruta a archivo YAML o None).
+            Por defecto busca 'config.yaml' si existe.
+        max_cores (int, opcional):
+            Cantidad máxima de núcleos de CPU a utilizar. Si se omite, usa el valor de la
+            configuración o todos los disponibles.
+        show_progress (bool, opcional):
+            Si es True, muestra la barra de progreso (tqdm) y resúmenes en consola.
+            Por defecto True.
+
+    Retorna:
+        list[tuple[str, str]]: Lista de tuplas (ruta_imagen, error) para imágenes que fallaron.
+                               Si todo se procesó correctamente, retorna lista vacía [].
+    """
+    loaded_config = load_config(config)
+
+    if max_cores is not None:
+        loaded_config['max_cores'] = max_cores
+
+    output_dir_str = str(output_dir)
+    os.makedirs(output_dir_str, exist_ok=True)
+
     valid_exts = {'.jpg', '.jpeg', '.png', '.webp'}
-    images = [
-        os.path.join(input_dir, f) for f in os.listdir(input_dir)
-        if Path(f).suffix.lower() in valid_exts
-    ]
+
+    # Resolver lista de imágenes según el tipo de input_path
+    if isinstance(input_path, (list, tuple, set)):
+        images = [str(p) for p in input_path if Path(p).suffix.lower() in valid_exts]
+    else:
+        p = Path(input_path)
+        if not p.exists():
+            raise FileNotFoundError(f"Directorio o archivo de entrada no encontrado: {input_path}")
+        if p.is_file():
+            if p.suffix.lower() in valid_exts:
+                images = [str(p)]
+            else:
+                images = []
+        elif p.is_dir():
+            images = [
+                os.path.join(str(p), f) for f in os.listdir(p)
+                if Path(f).suffix.lower() in valid_exts
+            ]
+        else:
+            images = []
 
     total = len(images)
     if total == 0:
-        print("No se encontraron imágenes válidas en el directorio de entrada.")
+        if show_progress:
+            print("No se encontraron imágenes válidas en el directorio de entrada.")
         return []
 
-    print(f"Encontradas {total} imágenes. Iniciando procesamiento en paralelo...")
+    if show_progress:
+        print(f"Encontradas {total} imágenes. Iniciando procesamiento en paralelo...")
 
-    # Determinar el número de cores a usar (configurable desde config.yaml con 'max_cores')
+    # Determinar el número de cores a usar
     available_cores = multiprocessing.cpu_count()
     config_cores = (
-        config.get('max_cores')
-        or config.get('max_workers')
-        or (config.get('execution', {}).get('max_cores') if isinstance(config.get('execution'), dict) else None)
+        loaded_config.get('max_cores')
+        or loaded_config.get('max_workers')
+        or (loaded_config.get('execution', {}).get('max_cores') if isinstance(loaded_config.get('execution'), dict) else None)
     )
 
     if config_cores is not None:
@@ -163,14 +269,28 @@ def run_pipeline(input_dir, output_dir, config):
 
     failed_images = []
     with ProcessPoolExecutor(max_workers=num_cores) as executor:
-        transformations_config = config.get('transformations', {})
+        transformations_config = loaded_config.get('transformations', {})
         futures = {
-            executor.submit(process_single_image, img_path, output_dir, transformations_config): img_path
+            executor.submit(process_single_image, img_path, output_dir_str, transformations_config): img_path
             for img_path in images
         }
 
-        # Barra de progreso que se actualiza conforme cada imagen termina
-        with tqdm(total=total, desc="Procesando", unit="img", file=sys.stdout) as pbar:
+        if show_progress:
+            with tqdm(total=total, desc="Procesando", unit="img", file=sys.stdout) as pbar:
+                for future in as_completed(futures):
+                    img_path = futures[future]
+                    try:
+                        result = future.result()
+                        if isinstance(result, tuple):
+                            success, error = result
+                            if not success:
+                                failed_images.append((img_path, error))
+                        elif result is False:
+                            failed_images.append((img_path, "Error desconocido"))
+                    except Exception as exc:
+                        failed_images.append((img_path, str(exc)))
+                    pbar.update(1)
+        else:
             for future in as_completed(futures):
                 img_path = futures[future]
                 try:
@@ -183,18 +303,31 @@ def run_pipeline(input_dir, output_dir, config):
                         failed_images.append((img_path, "Error desconocido"))
                 except Exception as exc:
                     failed_images.append((img_path, str(exc)))
-                pbar.update(1)
 
-    print("Procesamiento completado.")
-    if failed_images:
-        failed_images.sort(key=lambda x: str(x[0]))
-        print(f"\nImágenes que fallaron ({len(failed_images)}/{total}):")
-        for img_path, err in failed_images:
-            if err:
-                print(f" - {img_path}: {err}")
-            else:
-                print(f" - {img_path}")
-    else:
-        print("Todas las imágenes se procesaron correctamente.")
+    if show_progress:
+        print("Procesamiento completado.")
+        if failed_images:
+            failed_images.sort(key=lambda x: str(x[0]))
+            print(f"\nImágenes que fallaron ({len(failed_images)}/{total}):")
+            for img_path, err in failed_images:
+                if err:
+                    print(f" - {img_path}: {err}")
+                else:
+                    print(f" - {img_path}")
+        else:
+            print("Todas las imágenes se procesaron correctamente.")
 
     return failed_images
+
+
+def run_pipeline(input_dir, output_dir, config):
+    """
+    Ejecuta el pipeline completo de procesamiento masivo.
+    Mantenido para total retrocompatibilidad.
+    """
+    return process_images(
+        input_path=input_dir,
+        output_dir=output_dir,
+        config=config,
+        show_progress=True,
+    )

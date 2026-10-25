@@ -6,7 +6,14 @@ import pytest
 import yaml
 from PIL import Image
 
-from processor import process_single_image, run_pipeline, ProcessPoolExecutor
+from processor import (
+    process_single_image,
+    run_pipeline,
+    process_images,
+    load_config,
+    ProcessPoolExecutor,
+)
+import image_processor
 
 
 class TestProcessSingleImage:
@@ -201,7 +208,7 @@ class TestProcessSingleImage:
         with Image.open(out_path) as out_img:
             assert out_img.size == (40, 40)
 
-    def test_error_handling_corrupted_file(self, tmp_path, capsys):
+    def test_error_handling_corrupted_file(self, tmp_path):
         """Verifica que un archivo corrupto capture la excepción y no cause crash."""
         corrupted_path = tmp_path / "corrupted.png"
         corrupted_path.write_bytes(b"esto no es una imagen valida")
@@ -209,23 +216,23 @@ class TestProcessSingleImage:
         output_dir.mkdir(parents=True, exist_ok=True)
 
         # No debe lanzar excepción
-        process_single_image(str(corrupted_path), str(output_dir), {})
+        success, error = process_single_image(str(corrupted_path), str(output_dir), {})
 
-        captured = capsys.readouterr()
-        assert "Error procesando" in captured.out
+        assert success is False
+        assert error is not None
         # No se debió generar ninguna imagen en output_dir
         assert len(list(output_dir.glob("*"))) == 0
 
-    def test_error_handling_nonexistent_file(self, tmp_path, capsys):
+    def test_error_handling_nonexistent_file(self, tmp_path):
         """Verifica que una ruta inexistente capture la excepción adecuadamente."""
         nonexistent_path = tmp_path / "does_not_exist.png"
         output_dir = tmp_path / "output_nonexistent"
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        process_single_image(str(nonexistent_path), str(output_dir), {})
+        success, error = process_single_image(str(nonexistent_path), str(output_dir), {})
 
-        captured = capsys.readouterr()
-        assert "Error procesando" in captured.out
+        assert success is False
+        assert error is not None
 
 
 class TestRunPipeline:
@@ -330,7 +337,7 @@ class TestRunPipeline:
         run_pipeline(str(dummy_images_dir), str(output_dir), config)
 
         # En config.yaml:
-        # pipeline: resize(800x800, stretch) -> rotate(45, crop) -> brightness
+        # pipeline: resize(800x800, stretch) -> rotate(45, crop) -> brightness -> rotate -> grayscale
         # copies: 3
         # 4 imágenes dummy de entrada * 3 aumentos = 12 imágenes generadas
         output_files = list(output_dir.glob("*"))
@@ -539,3 +546,140 @@ transformations:
         for f in generated:
             with Image.open(f) as img:
                 assert img.size == (120, 120)
+
+
+class TestProcessImagesLibrary:
+    """Pruebas específicas para el uso del paquete como biblioteca de Python."""
+
+    def test_library_imports(self):
+        """Verifica que la función process_images sea importable desde processor y desde image_processor."""
+        import processor
+        import image_processor
+
+        assert hasattr(processor, "process_images")
+        assert hasattr(image_processor, "process_images")
+        assert callable(processor.process_images)
+        assert callable(image_processor.process_images)
+
+    def test_process_images_with_yaml_file_path(self, tmp_path, dummy_images_dir, test_config_file):
+        """Verifica que process_images acepte directamente la ruta a un archivo config.yaml (str o Path)."""
+        config_path, _ = test_config_file(
+            transformations={
+                "copies": 2,
+                "pipeline": [
+                    {"type": "resize", "width": 64, "height": 64, "mode": "stretch"}
+                ]
+            }
+        )
+        output_dir = tmp_path / "out_lib_yaml"
+
+        failed = process_images(str(dummy_images_dir), output_dir, config=str(config_path), show_progress=False)
+
+        assert failed == []
+        generated = list(output_dir.glob("*"))
+        assert len(generated) == 8  # 4 imagenes * 2 copias
+        for f in generated:
+            with Image.open(f) as img:
+                assert img.size == (64, 64)
+
+    def test_process_images_via_image_processor_package(self, tmp_path, dummy_images_dir):
+        """Verifica que la invocación como biblioteca (image_processor.process_images) funcione correctamente."""
+        output_dir = tmp_path / "out_lib_pkg"
+        config = {
+            "transformations": {
+                "copies": 0,
+                "pipeline": [
+                    {"type": "resize", "width": 50, "height": 50, "mode": "stretch"}
+                ]
+            }
+        }
+
+        failed = image_processor.process_images(dummy_images_dir, output_dir, config=config, show_progress=False)
+
+        assert failed == []
+        generated = list(output_dir.glob("*"))
+        assert len(generated) == 4
+        for f in generated:
+            with Image.open(f) as img:
+                assert img.size == (50, 50)
+
+    def test_process_images_with_dict_config_shorthand(self, tmp_path, dummy_images_dir):
+        """Verifica que process_images acepte un diccionario directo con 'pipeline' sin 'transformations'."""
+        output_dir = tmp_path / "out_lib_dict_shorthand"
+        config = {
+            "copies": 1,
+            "pipeline": [
+                {"type": "resize", "width": 32, "height": 32, "mode": "stretch"}
+            ]
+        }
+
+        failed = process_images(str(dummy_images_dir), str(output_dir), config=config, show_progress=False)
+
+        assert failed == []
+        generated = list(output_dir.glob("*"))
+        assert len(generated) == 4
+        for f in generated:
+            with Image.open(f) as img:
+                assert img.size == (32, 32)
+
+    def test_process_images_single_image_input(self, tmp_path, dummy_image_factory):
+        """Verifica que process_images procese una sola imagen dada como ruta a archivo."""
+        img_path = dummy_image_factory("solo.png", size=(100, 100))
+        output_dir = tmp_path / "out_lib_single"
+
+        config = {
+            "pipeline": [
+                {"type": "resize", "width": 40, "height": 40, "mode": "stretch"}
+            ]
+        }
+
+        failed = process_images(str(img_path), str(output_dir), config=config, show_progress=False)
+
+        assert failed == []
+        out_file = output_dir / "solo.png"
+        assert out_file.exists()
+        with Image.open(out_file) as img:
+            assert img.size == (40, 40)
+
+    def test_process_images_list_of_images_input(self, tmp_path, dummy_image_factory):
+        """Verifica que process_images acepte una lista explícita de rutas de imágenes."""
+        img1 = dummy_image_factory("img1.png", size=(50, 50))
+        img2 = dummy_image_factory("img2.png", size=(60, 60))
+        output_dir = tmp_path / "out_lib_list"
+
+        config = {"copies": 0}
+
+        failed = process_images([img1, img2], output_dir, config=config, show_progress=False)
+
+        assert failed == []
+        assert (output_dir / "img1.png").exists()
+        assert (output_dir / "img2.png").exists()
+
+    def test_process_images_max_cores_override(self, tmp_path, dummy_images_dir):
+        """Verifica que el parámetro max_cores se respete como argumento directo en process_images."""
+        output_dir = tmp_path / "out_lib_cores"
+
+        with patch("processor.ProcessPoolExecutor", wraps=ProcessPoolExecutor) as mock_executor:
+            process_images(
+                dummy_images_dir,
+                output_dir,
+                config={"copies": 0},
+                max_cores=2,
+                show_progress=False,
+            )
+            assert mock_executor.call_args[1]["max_workers"] == 2
+
+    def test_process_images_nonexistent_input_raises(self, tmp_path):
+        """Verifica que si la ruta de entrada no existe se lance FileNotFoundError."""
+        with pytest.raises(FileNotFoundError):
+            process_images(tmp_path / "non_existent_folder", tmp_path / "out", show_progress=False)
+
+    def test_process_images_nonexistent_config_raises(self, tmp_path, dummy_images_dir):
+        """Verifica que si la ruta al archivo de config no existe se lance FileNotFoundError."""
+        with pytest.raises(FileNotFoundError):
+            process_images(dummy_images_dir, tmp_path / "out", config="inexistente.yaml", show_progress=False)
+
+    def test_process_images_invalid_config_type_raises(self, tmp_path, dummy_images_dir):
+        """Verifica que pasar un tipo de configuración inválido lance TypeError."""
+        with pytest.raises(TypeError):
+            process_images(dummy_images_dir, tmp_path / "out", config=12345, show_progress=False)

@@ -1,7 +1,7 @@
-max_cores: 4 # Número máximo de cores a utilizar en paralelo (opcional, por defecto usa todos los disponibles)
+max_cores: 67 # Número máximo de cores a utilizar en paralelo (opcional, por defecto usa todos los disponibles)
 
 transformations:
-  copies: 3 # Cuántas variantes generar por cada imagen original
+  copies: 2 # Cuántas variantes generar por cada imagen original
   pipeline:
     - type: resize
       width: 800
@@ -13,3 +13,7 @@ transformations:
     - type: brightness
       min_factor: 0.5 # 1.0 es original, <1 oscurece, >1 ilumina
       max_factor: 1.5
+    - type: rotate
+      angle: 45
+      mode: fill
+    - type: grayscale

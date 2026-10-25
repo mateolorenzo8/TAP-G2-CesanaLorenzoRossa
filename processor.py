@@ -121,7 +121,6 @@ def process_single_image(input_path, output_dir, config):
 
         return True, None
     except Exception as e:
-        print(f"\nError procesando {input_path}: {e}")
         return False, str(e)
 
 

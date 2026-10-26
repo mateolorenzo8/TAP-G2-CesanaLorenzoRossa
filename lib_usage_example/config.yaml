@@ -1,0 +1,13 @@
+max_cores: 2
+
+transformations:
+  copies: 2
+  pipeline:
+    - type: resize
+      width: 300
+      height: 300
+      mode: fit
+    - type: rotate
+      angle: 90
+      mode: crop
+    - type: grayscale
